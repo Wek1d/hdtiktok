@@ -1,0 +1,19 @@
+# Yedekler
+yedek/
+*.7z
+*.zip
+*.rar
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editör
+.vscode/
+.idea/
+*.swp
+
+# Gelecekte build aracı eklenirse
+node_modules/
+dist/
+.env
