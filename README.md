@@ -12,13 +12,13 @@ Type a username (or paste a `tiktok.com/@…` link) and hit **Fetch**. You get t
 
 TikTok has no public API for this. The profile page embeds its own data as JSON in a `<script id="__UNIVERSAL_DATA_FOR_REHYDRATION__">` tag (`webapp.user-detail` → `userInfo` = `{ user, stats }`). hdtiktok fetches that page and reads the JSON in your browser (`parseProfileHtml` in `app.js`; `SIGI_STATE` is tried as a fallback).
 
-Browsers can't call TikTok directly (CORS), so the page is fetched through, in order:
+Browsers can't call TikTok directly (CORS), so the page is fetched through:
 
 1. **Your own Cloudflare Worker** (optional, recommended — see `worker/`), then
-2. reader services that open the page in a real browser and return markdown/JSON (Jina Reader → Microlink), then
-3. classic HTML proxies (allorigins → codetabs → corsproxy.io).
+2. reader services that open the page in a real browser and return markdown/JSON. **Jina Reader and Microlink run in parallel**; Jina gets a ~1.2 s head start because it also returns stats and bio. If Microlink wins and Jina arrives later, its stats are merged into the result. Then
+3. classic HTML proxies (allorigins, codetabs, corsproxy.io) — tried **in parallel** with a 6 s timeout.
 
-Reader services are tried before HTML proxies because TikTok's WAF usually answers datacenter IPs with a "Please wait…" challenge page; readers execute the page and return the real content. TikTok's oEmbed endpoint (which is CORS-enabled) is used as a final existence check so the UI can tell "user not found" apart from "blocked".
+Reader services are tried before HTML proxies because TikTok's WAF usually answers datacenter IPs with a "Please wait…" challenge page; readers execute the page and return the real content. Only images whose TikTok CDN URL looks like an avatar (`-avt-` / `musically-maliva-obj`) are accepted, and `Avatar for <user>` alt text must match the requested user, so post/playlist covers are never shown as the profile picture. Successful profile lookups are cached for 10 minutes (`sessionStorage` + memory) so repeating a username is instant.
 
 Things to know honestly:
 
@@ -62,7 +62,7 @@ docs/                             Build output served by GitHub Pages — don't 
 
 ## Privacy
 
-No analytics, no trackers, no cookies, no accounts, no server of our own. `localStorage` only holds preferences (`hdtiktok-lang`, `hdtiktok-theme`, `hdtiktok:format`), the last 6 usernames and the last working proxy. Requests go through the worker/reader/proxy services above, which can see which username you looked up.
+No analytics, no trackers, no cookies, no accounts, no server of our own. `localStorage` only holds preferences (`hdtiktok-lang`, `hdtiktok-theme`, `hdtiktok:format`), the last 6 usernames and the last working proxy. `sessionStorage` keeps the last 10 minutes of profile results so repeat lookups are instant; it is cleared when the tab closes. Requests go through the worker/reader/proxy services above, which can see which username you looked up.
 
 ## Notes
 

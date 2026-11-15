@@ -583,13 +583,6 @@ const READERS = [
   { id: 'jina',      kind: 'markdown', build: (url) => `https://r.jina.ai/${url}` },
   { id: 'microlink', kind: 'json',     build: (url) => `https://api.microlink.io/?url=${encodeURIComponent(url)}` },
 ];
-function orderedSources(pageUrl) {
-  const list = [
-    ...READERS.map((r) => ({ id: r.id, kind: r.kind, url: r.build(pageUrl) })),
-    ...PROXIES.map((p) => ({ id: p.id, kind: 'html', url: p.build(pageUrl) })),
-  ];
-  return WORKER ? [{ id: 'worker', kind: 'html', url: WORKER.build(pageUrl) }, ...list] : list;
-}
 /* ---------- TikTok profil sayfası ayrıştırma ----------
    Kaynak: sayfadaki #__UNIVERSAL_DATA_FOR_REHYDRATION__ JSON'u →
    __DEFAULT_SCOPE__['webapp.user-detail'].userInfo = { user, stats }.
@@ -615,19 +608,62 @@ function cleanMarkdownText(value) {
     .replace(/\s+/g, ' ')
     .trim();
 }
-/* Jina Reader çıktısındaki ilk profil avatarını bulur.
-   Önerilen hesapların görselleri "Avatar for …" alt metniyle gelir; atlanır. */
-function markdownAvatarCandidates(md) {
+/* TikTok CDN'inde avatar görselleri "-avt-" (ör. tos-alisg-avt-0068) ya da
+   "/avt/" içerir. Video/oynatma listesi kapakları, paylaşım kartları ve
+   site görselleri bu işareti taşımaz; böylece yanlış görsel seçilmez. */
+function isAvatarUrl(url) {
+  if (!url || typeof url !== 'string') return false;
+  if (!/tiktokcdn|ibytedtos|byteimg/i.test(url)) return false;
+  if (/share_img|ttwstatic|origin\.image/i.test(url)) return false;
+  return /-avt-|\/avt\/|musically-maliva-obj/i.test(url);
+}
+/* "Image 1: Avatar for sekwvr" → "sekwvr" */
+function avatarAltTarget(alt) {
+  const m = String(alt || '').match(/avatar for\s+@?([\w.\-]+)/i);
+  return m ? m[1].toLowerCase() : null;
+}
+/* Jina Reader çıktısındaki profil avatarını bulur.
+   Profil avatarı da "Avatar for <kullanıcı>" alt metniyle gelir; önerilen
+   hesapların avatarları aynı biçimde ama başka adla gelir. Bu yüzden alt
+   metindeki ad hedef kullanıcıyla karşılaştırılır. */
+function markdownAvatarCandidates(md, username) {
+  const target = String(username || '').trim().replace(/^@/, '').toLowerCase();
   const seen = new Set();
   for (const m of md.matchAll(/!\[([^\]]*)\]\((https?:\/\/[^)\s]+)\)/g)) {
     const alt = m[1] || '';
     const url = m[2] || '';
-    if (/avatar for/i.test(alt)) continue;
-    if (!/tiktokcdn|ibytedtos|byteimg/i.test(url)) continue;
-    if (/share_img|ttwstatic|origin\.image/i.test(url)) continue;
+    const altTarget = avatarAltTarget(alt);
+    if (altTarget) {
+      if (target && altTarget !== target) continue;
+    } else if (/suggested/i.test(alt)) {
+      continue;
+    }
+    if (!isAvatarUrl(url)) continue;
     seen.add(url);
   }
   return [...seen];
+}
+/* Jina markdown'ında biyografi, kullanıcı adı ve istatistik başlıklarından
+   sonra gelen ilk ## başlığıdır. */
+function markdownBio(md, username, nickname) {
+  const norm = (v) => cleanMarkdownText(v).replace(/^@/, '').toLowerCase();
+  const uname = norm(username || '');
+  const nick = norm(nickname || '');
+  const skip = /^(suggested accounts?|view all|company|program|terms & policies|log ?in|sign ?up|follow|following|message|share)$/i;
+  const statLine = /^[\d.,]+\s*[KMB]?\s*(following|followers|likes|videos)$/i;
+  for (const line of String(md).split('\n')) {
+    const m = line.match(/^#{2,4}\s+(.+?)\s*$/);
+    if (!m) continue;
+    const text = cleanMarkdownText(m[1]);
+    if (!text) continue;
+    if (skip.test(text) || statLine.test(text)) continue;
+    if (/^tiktok shop\b/i.test(text)) continue;
+    const key = norm(text);
+    if (uname && key === uname) continue;
+    if (nick && key === nick) continue;
+    return text.slice(0, 240);
+  }
+  return '';
 }
 function markdownStat(md, label) {
   const m = md.match(new RegExp('\\*\\*([\\d.,]+\\s*[KMB]?)\\*\\*\\s*' + label, 'i'));
@@ -639,22 +675,22 @@ function parseReaderMarkdown(md, username) {
   if (/couldn[’'`]?t find (?:this|the) account|account (?:was )?not found|user not found/i.test(md)) {
     return { status: 'notFound' };
   }
-  const avatars = markdownAvatarCandidates(md);
+  const avatars = markdownAvatarCandidates(md, username);
   if (!avatars.length) return { status: 'blocked' };
 
   const titleLine = md.match(/^Title:\s*(.+)$/m);
   const titleMatch = titleLine && titleLine[1].match(/^(.*?)\s*\(@([^)]+)\)/);
   const heading = md.match(/^#\s+(.+?)\s*$/m);
   const userHead = md.match(/^##\s+@?([^\s#]+)\s*$/m);
-  const afterMessage = md.split(/\[Message\]\([^)]*\)/i)[1] || '';
-  const bio = cleanMarkdownText(afterMessage.trim().split(/\n{2,}/)[0] || '').slice(0, 240);
+  const nickname = cleanMarkdownText((titleMatch && titleMatch[1]) || (heading && heading[1]) || '');
+  const resolvedUsername = cleanMarkdownText((titleMatch && titleMatch[2]) || (userHead && userHead[1]) || username);
 
   return {
     status: 'ok',
     profile: {
-      username: cleanMarkdownText((titleMatch && titleMatch[2]) || (userHead && userHead[1]) || username),
-      nickname: cleanMarkdownText((titleMatch && titleMatch[1]) || (heading && heading[1]) || ''),
-      bio,
+      username: resolvedUsername,
+      nickname,
+      bio: markdownBio(md, resolvedUsername, nickname),
       verified: /verified (?:account|badge)|\(verified\)/i.test(md),
       isPrivate: /this account is private|private account/i.test(md),
       /* Sayfadaki ilk görsel profildeki avatardır; sonrakiler video/LIVE
@@ -677,7 +713,7 @@ function parseMicrolink(json, username) {
     return { status: 'notFound' };
   }
   const imageUrl = d.image && d.image.url ? String(d.image.url) : '';
-  if (!imageUrl || !/tiktokcdn|ibytedtos|byteimg/i.test(imageUrl) || /share_img|ttwstatic/i.test(imageUrl)) {
+  if (!isAvatarUrl(imageUrl)) {
     return { status: 'blocked' };
   }
   const tm = title.match(/^(.+?)\s*\(@([^)]+)\)\s*on TikTok/i);
@@ -743,52 +779,162 @@ function parseProfileHtml(html) {
 }
 /* PARSER END */
 
-/* Profili sırayla: kendi Worker'ın → Jina/Microlink okuyucuları → HTML proxy'leri.
-   Okuyuculardan biri "hesap yok" derse diğeri de aynı şeyi söyleyince
-   notFound kabul edilir; tek bir servisin hatası yüzünden yanlış sonuç çıkmaz. */
-async function fetchProfile(username) {
-  const pageUrl = `https://www.tiktok.com/@${encodeURIComponent(username)}`;
-  const readerNotFound = new Set();
-  let saw404 = false, sawNotFound = false, sawBlocked = false, sawRate = false, sawNetwork = false;
-  for (const source of orderedSources(pageUrl)) {
-    try {
-      const res = await fetchT(source.url, {}, 12000);
-      if (res.status === 404) { saw404 = true; continue; }
-      if (res.status === 402 || res.status === 429) { sawRate = true; continue; }
-      if (!res.ok) { sawBlocked = true; continue; }
+/* Profil getirme sırası:
+   1) Kendi Worker'ın (yapılandırıldıysa) — en hızlı ve en güvenilir yol.
+   2) Jina Reader + Microlink aynı anda başlar. Jina'ya kısa bir öncelik
+      tanınır (istatistik + biyografi verir); Microlink önce biterse Jina
+      birkaç yüz ms daha beklenir, gelmezse Microlink ile devam edilir ve
+      Jina geç gelirse istatistikler onLate ile tamamlanır.
+   3) Hiçbiri olmazsa HTML proxy'leri paralel denenir.
+   Tek bir okuyucunun "hesap yok" demesi yeterlidir: bu metin yalnızca
+   TikTok gerçekten "Couldn't find this account" döndürdüğünde çıkar. */
+const READER_GRACE_MS = 1200;
+const READER_TIMEOUT_MS = 9000;
+const PROXY_TIMEOUT_MS = 6000;
 
-      let parsed;
-      if (source.kind === 'markdown') parsed = parseReaderMarkdown(await res.text(), username);
-      else if (source.kind === 'json') parsed = parseMicrolink(await res.json().catch(() => null), username);
-      else parsed = parseProfileHtml(await res.text());
-
-      if (parsed.status === 'ok' && parsed.profile.avatars.length) {
-        /* HTML proxy'leri görsel indirmede de kullanılıyor; çalışanı hatırla.
-           Okuyucular görsel URL'si için kullanılmadığından önbelleğe alınmaz. */
-        if (source.kind === 'html' && source.id !== 'worker') setPreferredProxy(source.id);
-        return parsed.profile;
-      }
-      if (parsed.status === 'notFound') {
-        sawNotFound = true;
-        if (source.kind === 'markdown' || source.kind === 'json') {
-          readerNotFound.add(source.id);
-          /* İki bağımsız okuyucu da "yok" diyorsa HTML proxy'lerini beklemeye gerek yok. */
-          if (readerNotFound.size >= READERS.length) throw makeErr('notFound');
-        }
-        continue;
-      }
-      sawBlocked = true;
-    } catch (e) {
-      if (e && e.type) throw e;
-      sawNetwork = true;
+async function readReader(source, username) {
+  try {
+    const res = await fetchT(source.url, {}, READER_TIMEOUT_MS);
+    if (res.status === 404) return { status: 'notFound' };
+    if (res.status === 402 || res.status === 429) return { status: 'rate' };
+    if (!res.ok) return { status: 'blocked' };
+    const parsed = source.kind === 'json'
+      ? parseMicrolink(await res.json().catch(() => null), username)
+      : parseReaderMarkdown(await res.text(), username);
+    if (parsed.status === 'ok' && (!parsed.profile.avatars || !parsed.profile.avatars.length)) {
+      return { status: 'blocked' };
     }
+    return parsed;
+  } catch {
+    return { status: 'network' };
   }
-  if (sawNotFound) throw makeErr('notFound');
-  if (saw404) throw makeErr('notFound');
-  if (sawRate && !sawBlocked) throw makeErr('rateLimit');
-  if (sawBlocked) throw makeErr('blocked');
-  if (sawNetwork) throw makeErr('network');
+}
+
+async function fetchProfile(username, opts = {}) {
+  const onLate = typeof opts.onLate === 'function' ? opts.onLate : null;
+  const pageUrl = `https://www.tiktok.com/@${encodeURIComponent(username)}`;
+  const tally = { ok: 0, notFound: 0, rate: 0, blocked: 0, network: 0 };
+
+  /* 1) Kendi Worker'ın (varsa) */
+  if (WORKER) {
+    try {
+      const res = await fetchT(WORKER.build(pageUrl), {}, PROXY_TIMEOUT_MS);
+      if (res.ok) {
+        const parsed = parseProfileHtml(await res.text());
+        if (parsed.status === 'ok' && parsed.profile.avatars.length) return parsed.profile;
+        if (parsed.status === 'notFound') tally.notFound++;
+      }
+    } catch {}
+  }
+
+  /* 2) Okuyucular paralel */
+  const started = Date.now();
+  const tasks = new Map();
+  for (const reader of READERS) {
+    const source = { id: reader.id, kind: reader.kind, url: reader.build(pageUrl) };
+    tasks.set(source.id, readReader(source, username).then((result) => {
+      tally[result.status] = (tally[result.status] || 0) + 1;
+      return { source, result };
+    }));
+  }
+
+  const first = await Promise.race([...tasks.values()]);
+  let chosen = first.result.status === 'ok' ? first : null;
+  let lateTask = null;
+
+  if (chosen && chosen.source.id === 'microlink') {
+    /* Jina kısa bir süre daha beklenir: istatistik ve biyografi ondan gelir. */
+    const jinaTask = tasks.get('jina');
+    if (jinaTask) {
+      const wait = Math.max(0, READER_GRACE_MS - (Date.now() - started));
+      const jinaOrTimeout = await Promise.race([jinaTask, sleep(wait).then(() => null)]);
+      if (jinaOrTimeout && jinaOrTimeout.result.status === 'ok') chosen = jinaOrTimeout;
+      else if (!jinaOrTimeout) lateTask = jinaTask;
+    }
+  } else if (!chosen) {
+    /* İlk biten başarısızsa diğer okuyucuyu da bekle. */
+    const rest = await Promise.all([...tasks.values()]);
+    chosen = rest.find((r) => r.result.status === 'ok') || null;
+  }
+
+  if (chosen) {
+    if (lateTask && onLate) {
+      lateTask.then((r) => {
+        if (r && r.result.status === 'ok') {
+          try { onLate(r.result.profile); } catch {}
+        }
+      }).catch(() => {});
+    }
+    return chosen.result.profile;
+  }
+
+  /* 3) HTML proxy'leri paralel (worker zaten denendi) */
+  if (!tally.notFound) {
+    const profiles = await Promise.all(PROXIES.map(async (proxy) => {
+      try {
+        const res = await fetchT(proxy.build(pageUrl), {}, PROXY_TIMEOUT_MS);
+        if (!res.ok) { tally.blocked++; return null; }
+        const parsed = parseProfileHtml(await res.text());
+        if (parsed.status === 'ok' && parsed.profile.avatars.length) {
+          setPreferredProxy(proxy.id);
+          return parsed.profile;
+        }
+        if (parsed.status === 'notFound') tally.notFound++;
+        else tally.blocked++;
+      } catch { tally.network++; }
+      return null;
+    }));
+    const profile = profiles.find(Boolean);
+    if (profile) return profile;
+  }
+
+  if (tally.notFound) throw makeErr('notFound');
+  if (tally.rate && !tally.blocked) throw makeErr('rateLimit');
+  if (tally.blocked) throw makeErr('blocked');
+  if (tally.network) throw makeErr('network');
   throw makeErr('blocked');
+}
+
+/* ---------- Profil önbelleği (10 dk) ----------
+   Aynı hesabı yeniden açmak neredeyse anında gelsin diye. Avatar URL'leri
+   imzalı ve ~10 dk geçerli; süre dolunca profil yeniden çekilir. */
+const PROFILE_TTL_MS = 10 * 60 * 1000;
+const PROFILE_STORE_KEY = 'hdtiktok:profiles';
+const profileMemo = new Map();
+
+function readProfileStore() {
+  try { return JSON.parse(sessionStorage.getItem(PROFILE_STORE_KEY) || '{}') || {}; }
+  catch { return {}; }
+}
+function cacheProfileGet(username) {
+  const key = String(username || '').replace(/^@/, '').toLowerCase();
+  if (!key) return null;
+  let entry = profileMemo.get(key);
+  if (!entry) {
+    entry = readProfileStore()[key];
+  }
+  if (!entry || !entry.profile || Date.now() - entry.at > PROFILE_TTL_MS) {
+    profileMemo.delete(key);
+    return null;
+  }
+  profileMemo.set(key, entry);
+  return entry.profile;
+}
+function cacheProfileSet(username, profile) {
+  if (!profile || !profile.avatars || !profile.avatars.length) return;
+  const key = String(username || profile.username || '').replace(/^@/, '').toLowerCase();
+  if (!key) return;
+  const entry = { at: Date.now(), profile };
+  profileMemo.set(key, entry);
+  try {
+    const all = readProfileStore();
+    const now = Date.now();
+    for (const k of Object.keys(all)) {
+      if (!all[k] || now - all[k].at > PROFILE_TTL_MS) delete all[k];
+    }
+    all[key] = entry;
+    sessionStorage.setItem(PROFILE_STORE_KEY, JSON.stringify(all));
+  } catch {}
 }
 
 /* ---------- Variants ---------- */
@@ -917,18 +1063,6 @@ async function pickBestVariant(rawInput) {
   return { ...winner, isHighest: winner.url !== fallbackUrl };
 }
 
-/* TikTok avatar URL'leri imzalı (x-expires / x-signature): URL'yi değiştiremeyiz,
-   sadece verilen adaylar (Larger / Medium / Thumb) ölçülür, en büyüğü seçilir. */
-async function pickBestAvatar(urls) {
-  const results = await Promise.all(urls.map((url) => variantLimiter(async () => {
-    const dims = await loadImageDims(url);
-    return dims && dims.w && dims.h ? { url, w: dims.w, h: dims.h, area: dims.w * dims.h } : null;
-  })));
-  const best = results.filter(Boolean).sort((a, b) => b.area - a.area)[0];
-  if (!best) return { url: urls[0], w: 0, h: 0, isHighest: false };
-  return { ...best, isHighest: best.url === urls[0] };
-}
-
 /* ---------- Blob fetch + cache ---------- */
 const blobCache = new Map();
 async function sniffImage(blob) {
@@ -955,25 +1089,43 @@ async function normalizeImageBlob(b) {
   if (!mime) return null;
   return b.type === mime ? b : new Blob([b], { type: mime });
 }
+/* Proxy'ler sırayla değil paralel denenir: biri çalışıyorsa bekleme kısalır. */
+async function fetchViaProxies(url) {
+  const proxies = orderedProxies();
+  if (!proxies.length) throw makeErr('network');
+  return new Promise((resolve, reject) => {
+    let pending = proxies.length;
+    let settled = false;
+    const fail = () => {
+      if (settled) return;
+      if (--pending <= 0) { settled = true; reject(makeErr('network')); }
+    };
+    for (const proxy of proxies) {
+      fetchT(proxy.build(url), {}, 8000)
+        .then((r) => (r.ok ? r.blob() : Promise.reject(new Error('bad response'))))
+        .then(normalizeImageBlob)
+        .then((b) => {
+          if (!b) throw new Error('not an image');
+          if (settled) return;
+          settled = true;
+          setPreferredProxy(proxy.id);
+          resolve(b);
+        })
+        .catch(fail);
+    }
+  });
+}
 async function fetchImageBlob(url) {
   if (blobCache.has(url)) return blobCache.get(url);
   const promise = (async () => {
     try {
-      const r = await fetchT(url, { mode: 'cors' }, 12000);
+      const r = await fetchT(url, { mode: 'cors' }, 9000);
       if (r.ok) {
         const b = await normalizeImageBlob(await r.blob());
         if (b) return b;
       }
     } catch {}
-    for (const proxy of orderedProxies()) {
-      try {
-        const r = await fetchT(proxy.build(url), {}, 12000);
-        if (!r.ok) continue;
-        const b = await normalizeImageBlob(await r.blob());
-        if (b) { setPreferredProxy(proxy.id); return b; }
-      } catch {}
-    }
-    throw makeErr('network');
+    return fetchViaProxies(url);
   })();
   blobCache.set(url, promise);
   try { return await promise; }
@@ -1527,6 +1679,19 @@ function setActiveTab(tab) {
 tabAvatar.addEventListener('click', () => setActiveTab('avatar'));
 tabBanner.addEventListener('click', () => setActiveTab('banner'));
 
+/* Gerçek piksel boyutu görsel yüklenince okunur; böylece profil gelir gelmez
+   görsel gösterilir ve ekstra bir boyut ölçme isteği beklenmez. */
+function applyLoadedDims() {
+  const asset = state.assets[state.activeTab];
+  if (!asset || getView(asset).mode !== 'original') return;
+  const w = previewImg.naturalWidth, h = previewImg.naturalHeight;
+  if (!w || !h || (asset.w === w && asset.h === h)) return;
+  asset.w = w;
+  asset.h = h;
+  previewFrame.style.setProperty('--ar', `${w} / ${h}`);
+  renderSpecs();
+}
+
 function renderPreview() {
   const asset = state.assets[state.activeTab];
   if (!asset) return;
@@ -1542,10 +1707,12 @@ function renderPreview() {
   previewImg.onload = () => {
     previewImg.classList.add('loaded');
     previewFrame.classList.add('loaded');
+    applyLoadedDims();
   };
   if (previewImg.complete && previewImg.naturalWidth) {
     previewImg.classList.add('loaded');
     previewFrame.classList.add('loaded');
+    applyLoadedDims();
   }
   if (modeSwitch) {
     modeSwitch.hidden = false;
@@ -1712,6 +1879,35 @@ function renderError(type, username) {
 
 /* ---------- Main ---------- */
 let runToken = 0;
+/* Jina geç geldiğinde eksik istatistik/biyografiyi tamamlar. */
+function applyLateProfile(late) {
+  if (!late || !state.channel) return;
+  const ch = state.channel;
+  if (!ch.nickname && late.nickname) ch.nickname = late.nickname;
+  if (!ch.bio && late.bio) ch.bio = late.bio;
+  ['followers', 'following', 'likes', 'videos'].forEach((k) => {
+    if ((ch[k] === null || ch[k] === undefined) && late[k] !== null && late[k] !== undefined) ch[k] = late[k];
+  });
+  if (late.verified) ch.verified = true;
+  if (late.isPrivate) ch.isPrivate = true;
+  if (state.username) {
+    const cached = cacheProfileGet(state.username);
+    if (cached) {
+      cacheProfileSet(state.username, {
+        ...cached,
+        nickname: cached.nickname || late.nickname,
+        bio: cached.bio || late.bio,
+        followers: cached.followers ?? late.followers,
+        following: cached.following ?? late.following,
+        likes: cached.likes ?? late.likes,
+        videos: cached.videos ?? late.videos,
+        verified: cached.verified || late.verified,
+        isPrivate: cached.isPrivate || late.isPrivate,
+      });
+    }
+  }
+  renderChannelMeta();
+}
 async function run(rawInput) {
   const username = extractUsername(rawInput);
   if (!username) return;
@@ -1730,10 +1926,14 @@ async function run(rawInput) {
     resultSpecs.textContent = '';
 
     try {
-      const profile = await retry(() => fetchProfile(username), {
+      const cached = attempt === 0 ? cacheProfileGet(username) : null;
+      const profile = cached || await retry(() => fetchProfile(username, {
+        onLate: (late) => { if (!stale()) applyLateProfile(late); },
+      }), {
         retries: 1, minTimeout: 900,
         shouldRetry: (e) => !(e && (e.type === 'notFound' || e.type === 'blocked')),
       });
+      if (!cached) cacheProfileSet(username, profile);
       if (stale()) return;
       if (!profile.avatars.length) { renderError('noPic', username); goBtn.disabled = false; return; }
 
@@ -1747,11 +1947,10 @@ async function run(rawInput) {
       pushHistory(resolvedUsername);
       updateUrl(resolvedUsername);
 
-      const avatarBest = await pickBestAvatar(profile.avatars);
-      if (stale()) return;
+      const avatarUrl = profile.avatars[0];
       state.assets.avatar = {
-        url: avatarBest.url, w: avatarBest.w, h: avatarBest.h,
-        isHighest: avatarBest.isHighest, ext: extFromUrl(avatarBest.url),
+        url: avatarUrl, w: 0, h: 0,
+        isHighest: true, ext: extFromUrl(avatarUrl),
         size: null, blob: null, displayMode: 'original', variants: {},
       };
       state.assets.banner = null;   // TikTok'ta banner yok

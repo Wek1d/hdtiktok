@@ -1,7 +1,7 @@
 /* hdtiktok service worker — sadece uygulama kabuğunu önbelleğe alır.
    Strateji: önce ağ, ağ yoksa önbellek (güncellemeler hiç takılmaz).
    TikTok sayfaları / görseller / proxy istekleri asla önbelleğe alınmaz. */
-const CACHE = 'hdtiktok-shell-1b3e6602';
+const CACHE = 'hdtiktok-shell-a06ded14';
 const SHELL = ['./', 'style.css', 'app.js', 'hdtiktok.png', 'favicon-32.png', 'manifest.webmanifest'];
 
 self.addEventListener('install', (e) => {

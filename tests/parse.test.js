@@ -5,8 +5,8 @@ const path = require('path');
 const assert = require('assert');
 const src = fs.readFileSync(path.join(__dirname, '..', 'app.js'), 'utf8');
 const code = src.slice(src.indexOf('/* PARSER START */'), src.indexOf('/* PARSER END */'));
-const { parseProfileHtml, parseReaderMarkdown, parseMicrolink, parseCompactNumber } =
-  new Function(code + '; return { parseProfileHtml, parseReaderMarkdown, parseMicrolink, parseCompactNumber };')();
+const { parseProfileHtml, parseReaderMarkdown, parseMicrolink, parseCompactNumber, isAvatarUrl } =
+  new Function(code + '; return { parseProfileHtml, parseReaderMarkdown, parseMicrolink, parseCompactNumber, isAvatarUrl };')();
 
 const page = (json) => `<html><body><script id="__UNIVERSAL_DATA_FOR_REHYDRATION__" type="application/json">${JSON.stringify(json)}</script></body></html>`;
 const user = { uniqueId: 'demo', nickname: 'Demo Nick', signature: 'hello', verified: true, privateAccount: false,
@@ -55,7 +55,7 @@ const readerMd = `Title: Demo Nick (@demo) | TikTok
 URL Source: https://www.tiktok.com/@demo
 
 Markdown Content:
-![Image 1](https://p16-sign-va.tiktokcdn.com/a~c5_1080x1080.jpeg?x-expires=1&x-signature=L)
+![Image 1: Avatar for demo](https://p16-sign-va.tiktokcdn.com/tos-alisg-avt-0068/a~c5_1080x1080.jpeg?x-expires=1&x-signature=L)
 
 # Demo Nick
 
@@ -77,7 +77,7 @@ Follow
 
 Suggested accounts
 
-[![Image 2: Avatar for someone](https://p16-sign-va.tiktokcdn.com/b~c5_100x100.jpeg)](https://www.tiktok.com/@someone)
+[![Image 2: Avatar for someone](https://p16-sign-va.tiktokcdn.com/tos-useast5-avt-0068-tx/b~c5_100x100.jpeg)](https://www.tiktok.com/@someone)
 `;
 r = parseReaderMarkdown(readerMd, 'demo');
 assert.strictEqual(r.status, 'ok');
@@ -89,7 +89,56 @@ assert.strictEqual(r.profile.likes, 9800000);
 assert.strictEqual(r.profile.videos, 88);
 assert.strictEqual(r.profile.bio, 'merhaba dünya');
 assert.strictEqual(r.profile.avatars.length, 1, 'önerilen hesap avatarı atlanmalı');
-assert.ok(r.profile.avatars[0].includes('1080x1080'));
+assert.ok(r.profile.avatars[0].includes('avt-0068'));
+
+// 7b) Jina: hedefin kendi avatarı da "Avatar for <hedef>" ile gelir (sekwvr)
+const sekwvrMd = `Title: şeker (@sekwvr) | TikTok
+
+URL Source: https://www.tiktok.com/@sekwvr
+
+Markdown Content:
+![Image 1: Avatar for sekwvr](https://p19-common-sign.tiktokcdn-us.com/tos-alisg-avt-0068/f09450564a8332.jpeg?x-signature=a)
+
+### **90**Following
+
+**1.1M**Followers
+
+**118.1M**Likes
+
+## 🎀 ✉️: sekersekwr61@gmail.com
+
+Suggested accounts
+
+View all
+
+[![Image 2: Avatar for lalalalisa_m](https://p19-common-sign.tiktokcdn-us.com/tos-useast5-avt-0068-tx/03f66a57.jpeg?x-signature=b)](https://www.tiktok.com/@lalalalisa_m)
+`;
+r = parseReaderMarkdown(sekwvrMd, 'sekwvr');
+assert.strictEqual(r.status, 'ok');
+assert.strictEqual(r.profile.username, 'sekwvr');
+assert.strictEqual(r.profile.nickname, 'şeker');
+assert.strictEqual(r.profile.followers, 1100000);
+assert.strictEqual(r.profile.following, 90);
+assert.strictEqual(r.profile.likes, 118100000);
+assert.strictEqual(r.profile.bio, '🎀 ✉️: sekersekwr61@gmail.com');
+assert.strictEqual(r.profile.avatars.length, 1);
+assert.ok(r.profile.avatars[0].includes('f09450564a8332'), 'hedefin avatarı seçilmeli');
+assert.ok(!r.profile.avatars[0].includes('03f66a57'), 'önerilen hesap avatarları elenmeli');
+
+// 7c) Avatar biçimli olmayan görseller (video kapağı vb.) profil avatarı sayılmaz
+assert.strictEqual(parseReaderMarkdown(
+  'Title: Demo (@demo) | TikTok\n\n![Video cover](https://p16-sign-va.tiktokcdn.com/obj/tos-alisg-video-cover/abc.jpeg)\n\n**1.2M**Followers',
+  'demo'
+).status, 'blocked');
+assert.strictEqual(parseReaderMarkdown(
+  '![Image 1: Avatar for someone](https://p16-sign-va.tiktokcdn.com/tos-useast5-avt-0068-tx/x.jpeg)',
+  'demo'
+).status, 'blocked', 'başka hesabın avatarı hedefe yazılmamalı');
+
+// 7d) Avatar URL işaretleri
+assert.strictEqual(isAvatarUrl('https://p16-sign-va.tiktokcdn.com/tos-alisg-avt-0068/x.jpeg'), true);
+assert.strictEqual(isAvatarUrl('https://p16-sign-va.tiktokcdn.com/obj/abc.jpeg'), false);
+assert.strictEqual(isAvatarUrl('https://lf16-tiktok-web.ttwstatic.com/obj/share_img.png'), false);
 
 // 8) Jina Reader: olmayan hesap / bot sayfası
 assert.strictEqual(parseReaderMarkdown('Title: Couldn’t find this account.\n\nMarkdown Content:\nCouldn\'t find this account', 'yok').status, 'notFound');
@@ -101,7 +150,7 @@ r = parseMicrolink({
   data: {
     title: 'Demo Nick (@demo) on TikTok',
     description: 'Demo Nick (@demo) on TikTok | 9.8M Likes. 1.2M Followers.',
-    image: { url: 'https://p16-common-sign.tiktokcdn-us.com/a~tplv-tiktokx-cropcenter:1080:1080.jpeg?x-signature=1' },
+    image: { url: 'https://p16-common-sign.tiktokcdn-us.com/tos-alisg-avt-0068/a~tplv-tiktokx-cropcenter:1080:1080.jpeg?x-signature=1' },
   },
 }, 'demo');
 assert.strictEqual(r.status, 'ok');
@@ -116,5 +165,21 @@ assert.strictEqual(parseMicrolink({
   data: { title: 'Couldn’t find this account. (@yok) on TikTok', image: { url: 'https://lf16-tiktok-web.ttwstatic.com/obj/tiktok-web-common-sg/mtact/static/images/share_img.png' } },
 }, 'yok').status, 'notFound');
 assert.strictEqual(parseMicrolink({ status: 'fail' }, 'yok').status, 'blocked');
+
+// 11) Microlink: avatar olmayan görsel (paylaşım kartı) kullanılmamalı
+assert.strictEqual(parseMicrolink({
+  status: 'success',
+  data: {
+    title: 'Demo Nick (@demo) on TikTok',
+    image: { url: 'https://lf16-tiktok-web.ttwstatic.com/obj/tiktok-web-common-sg/mtact/static/images/share_img.png' },
+  },
+}, 'demo').status, 'blocked');
+assert.strictEqual(parseMicrolink({
+  status: 'success',
+  data: {
+    title: 'Demo Nick (@demo) on TikTok',
+    image: { url: 'https://p16-sign-va.tiktokcdn.com/obj/tos-alisg-video-cover/abc.jpeg' },
+  },
+}, 'demo').status, 'blocked');
 
 console.log('profil ayrıştırıcıları: tüm testler geçti ✅');
